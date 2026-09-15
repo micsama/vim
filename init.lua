@@ -68,6 +68,7 @@ require("plugins.ui") -- 用户界面和外观
 require("plugins.telescope") -- 搜索与项目导航
 require("plugins.mini") -- 配置 mini家族的 核心插件
 require("config.deferred") -- 依赖插件的延迟加载
+require("component.stldata").setup()
 require("component.statusline").setup()
 require("component.tabline").setup()
 

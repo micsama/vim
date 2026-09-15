@@ -30,7 +30,7 @@ lua/
 │   ├── ui.lua             #   notify、which-key、原生 UI2
 │   ├── telescope.lua      #   搜索快捷键与最近仓库入口
 │   ├── editor.lua         #   treesitter、匹配、缩进高亮
-│   └── llm/               #   AI 工具：codecompanion.lua / gpt5.lua / ollamaqwen3.lua
+│   └── llm/               #   AI 工具：codecompanion（deepseek 适配器）
 ├── component/             # 自定义 UI 组件
 │   ├── statusline.lua     #   状态栏
 │   ├── tabline.lua        #   标签页栏
@@ -159,3 +159,21 @@ nvim
 - 全局窗口默认值在 `window`，呼吸边框在 `pulse`（`enabled`、`period_s`、`interval_ms`），成功退出关窗延迟为 `autoclose_ms`。
 - 状态栏读取缓存；注册表在启动、会话操作、焦点恢复和目录变化时刷新。仍沿用共享 JSON 和最近会话恢复机制，多实例事务与精确会话恢复尚未改动。
 - 修改配置后重启 Neovim，不再保存 `init.lua` / `base.lua` 时自动部分重载。临时 `⌘N` 状态栏调试键已移除；`:StlProf on`、`:StlProf`、`:StlProf off` 保留。
+
+### 最近仓库与窗口放大
+
+- `<leader>fr`：选择仓库后新建标签页，以 `tcd` 设置项目目录，并打开 mini.files；不再自动恢复 Session 或猜测入口文件。目录失效时提示，不改变当前工作区。
+- 仓库列表中 `Ctrl-R` 修改别名，`Ctrl-D` 仅移除历史记录，不删除目录。
+- 排序以有效访问天数为主：同一仓库每天最多计一次，重启也不会重复累计。分数为 `log2(1 + 访问天数) + 近期加分`；近期加分最高 1 分，30 天减半，避免偶尔打开的项目轻易超过常用项目。
+- 仅接受当前记录结构（`path`、`days`、`last`、可选 `alias`），不迁移旧记录；旧仓库和别名需重新积累或设置。频率基分长期保留，不使用的历史可手动移除。
+- `⌘F` 放大窗口按标签页独立管理；窗口大小随界面调整，关闭时将阅读位置同步回仍显示同一 buffer 的来源窗口。
+
+### 状态栏与标签栏
+
+- `statusline.lua` 负责展示，`tabline.lua` 负责标签和布局，`stldata.lua` 统一维护诊断、Git 用户与 LSP 进度；`util.lua` 只提供文本截断、转义和重绘合并。
+- Tab 标签跟随最近的普通编辑窗口；Floatty、Telescope、mini.files 等浮窗不替换文件名。项目名使用 tab 的工作目录。
+- 窄窗口优先保留当前 tab，必要时隐藏项目标题、缩短文件名和省略装饰；中文按显示宽度截断。
+- 诊断事件即时更新缓存，两条栏共用。重绘请求在同一轮事件中合并，不再额外监听光标移动或启动诊断防抖定时器。
+- Git 用户名异步读取 `git config --get user.name`，支持 worktree / includeIf；切回 Neovide 时刷新已打开仓库的用户名。渲染函数不读取配置文件或启动进程。
+- LSP 进度显示最早开始的活跃任务，保留 report 中未提供的字段，客户端停止后不再显示；动画帧按时间计算，在界面重绘时更新，没有常驻动画定时器。
+- 临时评测：`:StlProf reset` → `:StlProf on` → 正常编辑/切 tab → `:StlProf off` → `:StlProf`。显示两条栏完整 Lua render 的调用数、最近 200 次的平均/P95/最大耗时；不包含 Neovim 绘制或 Neovide 呈现耗时。

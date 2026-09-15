@@ -7,8 +7,9 @@ local M = {}
 local json_store = require("utils.json_store")
 
 local data_path = vim.fn.stdpath("data") .. "/recent_repos.json"
-local half_life_days = 7 -- 指数衰减半衰期：多久没打开分数掉一半
-
+-- 每个仓库每天计一次有效访问；近期权重最多 1 分，不压过常用项目。
+local half_life_days = 30
+local recorded_today = {}
 local alias_hl = "RecentRepoAlias"
 local function ensure_alias_hl()
 	local palette = require("catppuccin.palettes").get_palette("mocha")
@@ -16,33 +17,59 @@ local function ensure_alias_hl()
 end
 
 local function load()
-	return json_store.read(data_path, {})
+	local result = {}
+	for _, e in ipairs(json_store.read(data_path, {})) do
+		if
+			type(e) == "table"
+			and type(e.path) == "string"
+			and e.path ~= ""
+			and type(e.days) == "number"
+			and e.days >= 1
+			and e.days < math.huge
+			and e.days % 1 == 0
+			and type(e.last) == "number"
+			and e.last >= 0
+			and e.last <= os.time()
+			and (e.alias == nil or type(e.alias) == "string")
+		then
+			result[#result + 1] = e
+		end
+	end
+	return result
 end
 
 local function save(data)
-	json_store.write(data_path, data)
+	if not json_store.write(data_path, data) then
+		vim.notify("无法保存最近仓库记录", vim.log.levels.WARN)
+	end
 end
 
-local function score(entry)
-	local days = (os.time() - (entry.last or 0)) / 86400
-	return (entry.count or 1) * (0.5 ^ (days / half_life_days))
+local function score(entry, now)
+	local age = math.max(0, now - entry.last) / 86400
+	return math.log(1 + entry.days) / math.log(2) + 0.5 ^ (age / half_life_days)
 end
 
--- 记录一次仓库访问（新增或计数 +1、刷新最近访问时间）
 function M.record(path)
 	if not path or path == "" then
 		return
 	end
+	local today = os.date("%Y-%m-%d")
+	if recorded_today[path] == today then
+		return
+	end
+	recorded_today[path] = today
 	local data = load()
 	for _, e in ipairs(data) do
 		if e.path == path then
-			e.count = (e.count or 1) + 1
+			if os.date("%Y-%m-%d", e.last) ~= today then
+				e.days = e.days + 1
+			end
 			e.last = os.time()
 			save(data)
 			return
 		end
 	end
-	table.insert(data, { path = path, count = 1, last = os.time() })
+	data[#data + 1] = { path = path, days = 1, last = os.time() }
 	save(data)
 end
 
@@ -50,7 +77,8 @@ function M.set_alias(path, alias)
 	local data = load()
 	for _, e in ipairs(data) do
 		if e.path == path then
-			e.alias = (alias ~= "" and alias) or nil
+			alias = vim.trim(alias)
+			e.alias = alias ~= "" and alias or nil
 			break
 		end
 	end
@@ -58,11 +86,30 @@ function M.set_alias(path, alias)
 end
 
 local function sorted_entries()
-	local data = load()
+	local data, now = load(), os.time()
 	table.sort(data, function(a, b)
-		return score(a) > score(b)
+		local sa, sb = score(a, now), score(b, now)
+		if sa ~= sb then
+			return sa > sb
+		end
+		if a.last ~= b.last then
+			return a.last > b.last
+		end
+		return a.path < b.path
 	end)
 	return data
+end
+
+function M.open(path)
+	if vim.fn.isdirectory(path) ~= 1 then
+		vim.notify("仓库目录不存在：" .. path, vim.log.levels.WARN)
+		return
+	end
+	local files = require("mini.files")
+	vim.cmd.tabnew()
+	vim.cmd.tcd(path)
+	M.record(path)
+	files.open(path, false)
 end
 
 -- 目录预览：优先用 eza（图标 + 颜色），否则退回 ls；只看一层，不递归子目录
@@ -136,7 +183,7 @@ function M.picker(opts)
 		})
 	end
 
-		local tree_previewer = previewers.new_termopen_previewer({
+	local tree_previewer = previewers.new_termopen_previewer({
 		title = "目录预览",
 		get_command = function(entry, status)
 			-- 标记这个 buffer 是本 picker 的预览，退出后好清掉 "[Process exited]" 提示行
@@ -159,80 +206,21 @@ function M.picker(opts)
 					if not selection then
 						return
 					end
-					local path = selection.value.path
-					vim.cmd.cd(path)
-					vim.notify(path, nil, { title = "cd ->", icon = "" })
+					M.open(selection.value.path)
+				end)
 
-					-- 项目里留有 Session.vim 就新开一个 tab 恢复上次的窗口布局，
-					-- 避免直接 source 覆盖掉当前 tab 正在看的东西
-					local session_file = path .. "/Session.vim"
-					if vim.fn.filereadable(session_file) == 1 then
-						vim.cmd.tabnew()
-						vim.cmd.source(session_file)
-					else
-						-- 没有 Session.vim 时，按顺序尝试打开常见项目入口文件
-						-- 顺序即优先级：先看文档说明，再退回各语言的工程清单文件
-						local fallback_files = {
-							-- 文档 / 说明
-							"README.md",
-							"README.rst",
-							"README.txt",
-							"README",
-							-- AI 助理配置
-							"CLAUDE.md",
-							"AGENTS.md",
-							-- Neovim / Lua
-							"init.lua",
-							-- Rust
-							"Cargo.toml",
-							-- Node / Deno / Bun
-							"package.json",
-							"deno.json",
-							"bun.lock",
-							-- Python
-							"pyproject.toml",
-							"setup.py",
-							"requirements.txt",
-							-- Go
-							"go.mod",
-							-- Elixir
-							"mix.exs",
-							-- Ruby / PHP
-							"Gemfile",
-							"composer.json",
-							-- JVM
-							"pom.xml",
-							"build.gradle",
-							"build.gradle.kts",
-							-- C / C++
-							"CMakeLists.txt",
-							"meson.build",
-							-- Zig
-							"build.zig",
-							-- Dart / Flutter
-							"pubspec.yaml",
-							-- Swift
-							"Package.swift",
-							-- Nix
-							"flake.nix",
-							"default.nix",
-							-- 通用构建
-							"Makefile",
-							"justfile",
-							"Justfile",
-							-- 容器 / 编排
-							"docker-compose.yml",
-							"Dockerfile",
-						}
-						for _, file in ipairs(fallback_files) do
-							local filepath = path .. "/" .. file
-							if vim.fn.filereadable(filepath) == 1 then
-								vim.cmd.tabnew()
-								vim.cmd.edit(filepath)
-								break
-							end
-						end
+				-- 仅移除历史记录，不操作磁盘目录。
+				map({ "n", "i" }, "<C-d>", function()
+					local selected = action_state.get_selected_entry()
+					if not selected then
+						return
 					end
+					local data = vim.tbl_filter(function(e)
+						return e.path ~= selected.value.path
+					end, load())
+					save(data)
+					recorded_today[selected.value.path] = nil
+					action_state.get_current_picker(prompt_bufnr):refresh(make_finder(), { reset_prompt = false })
 				end)
 
 				map({ "n", "i" }, "<C-r>", function()
