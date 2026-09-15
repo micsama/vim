@@ -4,6 +4,10 @@ local api = vim.api
 local utils = require("component.hl")
 local diag_icons = utils.icons.diag
 local data = require("component.stldata")
+local util = require("component.util")
+local esc_stl = util.escape
+local fl = require("apps.floatty")
+local fclaude = require("utils.floatty_claude")
 
 local R_ROUND = ""
 local L_ROUND = ""
@@ -75,10 +79,6 @@ end
 
 local C = {}
 
-local function esc_stl(text)
-	return text:gsub("%%", "%%%%")
-end
-
 local function fold_path(path, max_width)
 	if vim.fn.strdisplaywidth(path) <= max_width then
 		return path
@@ -95,12 +95,10 @@ local function fold_path(path, max_width)
 		if vim.fn.strdisplaywidth(folded) <= max_width then
 			return folded
 		end
-		return folded
+		return util.truncate(folded, max_width)
 	end
 
-	local keep = math.max(4, max_width - 1)
-	local chars = vim.fn.strchars(path)
-	return "…" .. vim.fn.strcharpart(path, math.max(0, chars - keep))
+	return util.truncate(path, max_width)
 end
 
 local function format_file_path(buf, win)
@@ -124,7 +122,7 @@ local function format_file_path(buf, win)
 	if dir == "." then
 		dir = ""
 	elseif dir ~= "" then
-		local max_dir_width = math.max(16, math.min(60, math.floor(vim.o.columns * 0.28)))
+		local max_dir_width = math.max(16, math.min(60, math.floor(api.nvim_win_get_width(win) * 0.28)))
 		dir = fold_path(dir, max_dir_width)
 	end
 
@@ -134,9 +132,8 @@ end
 function C.file_capsule(buf, win, mode_hl, is_active)
 	local file, dir = format_file_path(buf, win)
 	local hls = get_capsule_hl(mode_hl, is_active)
-	local file_hl = utils.get_compound_hl(hls.body, hls.body, true, false)
 	local readonly = api.nvim_get_option_value("readonly", { buf = buf }) and " " or ""
-	local path_part = string.format("%%#%s#%s", file_hl, file)
+	local path_part = string.format("%%#%s#%s", hls.body, file)
 
 	if dir ~= "" then
 		path_part = string.format("%s %%#%s#│ %s", path_part, hls.body, dir)
@@ -152,7 +149,7 @@ function C.git(buf)
 	end
 
 	local user_hl = (info.user == "micsama") and "Function" or "DiagnosticWarn"
-	local user_str = (info.user and info.user ~= false) and string.format(" %%#%s#(%s)", user_hl, info.user) or ""
+	local user_str = info.user and string.format(" %%#%s#(%s)", user_hl, esc_stl(info.user)) or ""
 	local diff_str = ""
 	if info.added > 0 then
 		diff_str = diff_str .. " %#MiniDiffSignAdd#" .. GIT_ADD .. info.added
@@ -164,52 +161,51 @@ function C.git(buf)
 		diff_str = diff_str .. " %#MiniDiffSignDelete#" .. GIT_DELETE .. info.deleted
 	end
 
-	return string.format(" %%#String#%s %s%%#Comment#%s%s", GIT_BRANCH, info.branch, user_str, diff_str)
+	return string.format(" %%#String#%s %s%%#Comment#%s%s", GIT_BRANCH, esc_stl(info.branch), user_str, diff_str)
 end
 
 function C.lsp(buf)
-	local info = data.lsp_info(buf)
-	if not info then
+	local counts = data.diagnostics(buf)
+	local err, warn = counts[1] or 0, counts[2] or 0
+	if err == 0 and warn == 0 then
 		return ""
 	end
 	local res = ""
-	if info.err > 0 then
-		res = res .. " %#DiagnosticError#" .. diag_icons[1].icon .. info.err
+	if err > 0 then
+		res = res .. " %#DiagnosticError#" .. diag_icons[1].icon .. err
 	end
-	if info.warn > 0 then
-		res = res .. " %#DiagnosticWarn#" .. diag_icons[2].icon .. info.warn
+	if warn > 0 then
+		res = res .. " %#DiagnosticWarn#" .. diag_icons[2].icon .. warn
 	end
 	return res .. " "
 end
 
 local spinner_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
-local spinner_idx = 1
 
-function C.lsp_progress()
+function C.lsp_progress(buf)
 	local info = data.lsp_progress()
 	if not info then
-		return vim.o.busy and " %#Comment#◐" or ""
+		return vim.bo[buf].busy > 0 and " %#Comment#◐" or ""
 	end
 
-	spinner_idx = (spinner_idx % #spinner_frames) + 1
+	local spinner_idx = math.floor(vim.uv.hrtime() / 1e8) % #spinner_frames + 1
 
 	-- 显示 title + message，让用户区分不同阶段
 	local msg = info.title
 	if info.message ~= "" then
 		msg = msg .. ": " .. info.message
 	end
-	if vim.fn.strchars(msg) > 24 then
-		msg = vim.fn.strcharpart(msg, 0, 24) .. "…"
-	end
+	msg = util.truncate(msg, 24)
 
 	-- 进度条（10 格宽，箭头指示位置）
 	local bar
 	local width = 10
 	if info.percentage then
-		local pos = math.floor(width * info.percentage / 100)
+		local percentage = math.max(0, math.min(100, info.percentage))
+		local pos = math.min(width - 1, math.floor(width * percentage / 100))
 		bar = string.rep("─", pos) .. ">" .. string.rep("─", math.max(0, width - pos - 1))
 	else
-		-- 无百分比：箭头来回跑（用 spinner_idx 驱动位置）
+		-- 无百分比：按时间计算位置，无额外动画定时器。
 		local pos = (spinner_idx - 1) % width
 		bar = string.rep("─", pos) .. ">" .. string.rep("─", width - pos - 1)
 	end
@@ -218,8 +214,6 @@ function C.lsp_progress()
 end
 
 function C.menu_alive()
-	local fl = require("apps.floatty")
-	local fclaude = require("utils.floatty_claude")
 	local items = fl.active_menu_indices()
 	local orphan_idx = fl.orphan_menu_indices()
 	if #items == 0 and #orphan_idx == 0 then
@@ -244,9 +238,9 @@ function C.menu_alive()
 	return s
 end
 
-function C.ruler(buf, mode_hl)
+function C.ruler(buf, win, mode_hl)
 	local ft = api.nvim_get_option_value("filetype", { buf = buf })
-	local row = api.nvim_win_get_cursor(vim.g.statusline_winid)[1]
+	local row = api.nvim_win_get_cursor(win)[1]
 	local total = api.nvim_buf_line_count(buf)
 	local progress = (row <= 1) and "󰘣"
 		or (row >= total and "󰘡" or string.format("%d%%%%", math.floor((row / total) * 100)))
@@ -259,11 +253,11 @@ function C.ruler(buf, mode_hl)
 	local cursor_str = string.format("%%#%s# %%l:%%c", hls.tail)
 	local sep_str = string.format("%%#%s#%s", hls.tail, L_ROUND)
 
-	return string.format("%%#StatusLine# %s%s %s %s%s", icon_str, ft, cursor_str, sep_str, progress_str)
+	return string.format("%%#StatusLine# %s%s %s %s%s", icon_str, esc_stl(ft), cursor_str, sep_str, progress_str)
 end
 
 function M.render()
-	local win = vim.g.statusline_winid
+	local win = vim.g.statusline_winid or api.nvim_get_current_win()
 	local buf = api.nvim_win_get_buf(win)
 
 	if win ~= api.nvim_get_current_win() then
@@ -277,12 +271,14 @@ function M.render()
 		C.lsp(buf),
 		"%=",
 		C.menu_alive(),
-		C.lsp_progress(),
-		C.ruler(buf, mode_hl),
+		C.lsp_progress(buf),
+		C.ruler(buf, win, mode_hl),
 	})
 end
 
--- statusline 组件耗时采样开关：:StlProf on|off 切换，:StlProf 打印统计。
+M.render = require("component.profiler").wrap("statusline", M.render)
+
+-- 两条栏渲染耗时采样开关：:StlProf on|off|reset，:StlProf 打印统计。
 -- 默认关闭，仅在调优 statusline 时临时开启（详见 component/profiler.lua）。
 local function setup_profiler_cmd()
 	api.nvim_create_user_command("StlProf", function(a)
@@ -293,13 +289,17 @@ local function setup_profiler_cmd()
 		elseif a.args == "off" then
 			prof.enabled = false
 			vim.notify("StlProf: 采样已关闭", vim.log.levels.INFO)
-		else
+		elseif a.args == "reset" then
+			prof.reset()
+		elseif a.args == "" then
 			prof.print_stats()
+		else
+			vim.notify("StlProf: 使用 on / off / reset", vim.log.levels.WARN)
 		end
 	end, {
 		nargs = "?",
 		complete = function()
-			return { "on", "off" }
+			return { "on", "off", "reset" }
 		end,
 	})
 end
@@ -316,25 +316,24 @@ function M.setup()
 	api.nvim_create_autocmd("ColorScheme", {
 		group = grp,
 		callback = function()
-			utils.reset_hl_cache()
 			capsule_hl_cache = {}
 			build_inactive_capsule_hl()
 			build_orphan_hl()
 		end,
 	})
 
-	api.nvim_create_autocmd("User", {
-		pattern = { "MiniGitUpdated", "MiniDiffUpdated" },
+	-- 光标移动、窗口切换由 Neovim 自身刷新；只补充自定义内容的变化。
+	api.nvim_create_autocmd("ModeChanged", {
 		group = grp,
 		callback = function()
-			vim.cmd.redrawstatus()
+			util.redraw(true, false)
 		end,
 	})
-
-	api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "WinEnter", "BufEnter", "LspProgress" }, {
+	api.nvim_create_autocmd("OptionSet", {
 		group = grp,
+		pattern = "busy",
 		callback = function()
-			vim.cmd.redrawstatus()
+			util.redraw(true, false)
 		end,
 	})
 end

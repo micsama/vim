@@ -14,6 +14,14 @@ M.icons = {
 
 local hl_cache = {}
 
+api.nvim_create_autocmd("ColorScheme", {
+	group = api.nvim_create_augroup("ComponentHighlights", { clear = true }),
+	callback = function()
+		M.reset_hl_cache()
+		require("component.util").redraw(true, true)
+	end,
+})
+
 function M.hl(name)
 	return api.nvim_get_hl(0, { name = name, link = false })
 end

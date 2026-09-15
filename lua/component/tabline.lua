@@ -1,300 +1,212 @@
--- ~/.config/nvim/lua/component/tabline.lua
 local M = {}
 local api = vim.api
-local utils = require("component.hl")
-local diag_icons = utils.icons.diag
+local hl = require("component.hl")
+local util = require("component.util")
+local data = require("component.stldata")
+local tab_bufs = {}
+local scroll_start = 1
 
-utils.reset_hl_cache()
-
---- 生成一个带高亮组的 tabline 片段，自动处理 %% 转义
-local function seg(hl_group, text)
-	return ("%%#%s#%s"):format(hl_group, text)
+local function seg(group, text)
+	return ("%%#%s#%s"):format(group, util.escape(text))
 end
 
-local state = {
-	diag_cache = {},
-	scroll_off = 0,
-	timer = vim.uv.new_timer(),
-	cwd_cache = { raw = nil, render = "", width = 0 },
-	tab_bufs = {},
-}
-
-local function get_cwd_component(max_chars)
-	local current_raw = vim.fn.getcwd()
-	if state.cwd_cache.raw == current_raw then
-		return state.cwd_cache.render, state.cwd_cache.width
+local function editing_buffer(win)
+	local config = api.nvim_win_get_config(win)
+	local buf = api.nvim_win_get_buf(win)
+	if config.relative == "" and not config.external and vim.bo[buf].buftype == "" then
+		return buf
 	end
-
-	local name = vim.fs.basename(current_raw)
-	if name == "" then
-		name = "/"
-	end
-
-	if api.nvim_strwidth(name) > max_chars then
-		name = vim.fn.strcharpart(name, 0, max_chars - 1) .. "…"
-	end
-
-	local text = "  " .. name .. "▕"
-	state.cwd_cache.raw = current_raw
-	state.cwd_cache.render = text
-	state.cwd_cache.width = api.nvim_strwidth(text)
-
-	return text, state.cwd_cache.width
 end
 
-local function make_tab_item(tabid, idx, is_sel, name_counts, path_counts, buf, path)
-	local base_hl = is_sel and "TabLineSel" or "TabLine"
-	local diag = state.diag_cache[buf]
+local function representative(tab)
+	local buf = tab_bufs[tab]
+	if buf and api.nvim_buf_is_valid(buf) and vim.bo[buf].buftype == "" then
+		return buf
+	end
+	buf = editing_buffer(api.nvim_tabpage_get_win(tab))
+	if not buf then
+		for _, win in ipairs(api.nvim_tabpage_list_wins(tab)) do
+			buf = editing_buffer(win)
+			if buf then
+				break
+			end
+		end
+	end
+	tab_bufs[tab] = buf
+	return buf
+end
 
-	local filename = (path == "") and "[No Name]" or vim.fs.basename(path)
-
-	if path ~= "" and (name_counts[filename] or 0) > 1 and (path_counts[path] or 0) == 1 then
+local function make_item(idx, selected, entry, names, paths, max_width)
+	local buf, path = entry.buf, entry.path
+	local base = selected and "TabLineSel" or "TabLine"
+	local filename = path == "" and "[No Name]" or vim.fs.basename(path)
+	if path ~= "" and names[filename] > 1 and paths[path] == 1 then
 		local parent = vim.fs.basename(vim.fs.dirname(path))
 		if parent ~= "" and parent ~= "." then
 			filename = parent .. "/" .. filename
 		end
 	end
 
-	if api.nvim_strwidth(filename) > 20 then
-		filename = vim.fn.strcharpart(filename, 0, 19) .. "…"
+	local diag
+	for severity = 1, 4 do
+		if (data.diagnostics(buf)[severity] or 0) > 0 then
+			diag = hl.icons.diag[severity]
+			break
+		end
 	end
-	local label = filename:gsub("%%", "%%%%")
-
-	-- 使用统一工具获取带背景色的 Icon
-	local icon_txt, final_icon_hl = utils.get_file_icon_with_bg(buf, base_hl, is_sel)
-
-	local mod_txt = vim.bo[buf].modified and " 󰷫▕" or " ▕"
-
-	local dup_txt = ""
-	if path ~= "" and (path_counts[path] or 0) > 1 then
-		dup_txt = " 󰆏"
+	local icon, icon_hl = "", base
+	if buf then
+		icon, icon_hl = hl.get_file_icon_with_bg(buf, base, selected)
 	end
-
-	local diag_icon = ""
-	local diag_hl = base_hl
-	if diag then
-		diag_icon = diag.icon
-		diag_hl = diag.hl
+	local prefix = (" %s%d "):format(selected and "󰄲 " or "󰄱 ", idx)
+	local icon_text = icon ~= "" and icon .. " " or ""
+	local diag_text = diag and diag.icon or ""
+	local duplicate = path ~= "" and paths[path] > 1 and " 󰆏" or ""
+	local modified = buf and vim.bo[buf].modified and " 󰷫▕" or " ▕"
+	local fixed = api.nvim_strwidth(prefix .. icon_text .. diag_text .. duplicate .. modified)
+	-- 单项超宽时优先留住序号和文件名，极窄窗口省掉装饰。
+	if max_width and fixed + 1 > max_width then
+		prefix, icon_text, diag_text, duplicate, modified = (" %d "):format(idx), "", "", "", ""
+		fixed = api.nvim_strwidth(prefix)
 	end
-
-	local final_name_hl = base_hl
-	if (not is_sel) and diag then
-		final_name_hl = utils.get_compound_hl(diag_hl, base_hl, false, false)
-	end
-
-	local final_diag_hl = base_hl
-	if diag then
-		final_diag_hl = utils.get_compound_hl(diag_hl, base_hl, is_sel, false)
-	end
-	local final_mod_hl = utils.get_compound_hl("DiagnosticOk", base_hl, is_sel, false)
-	local icon_w = api.nvim_strwidth(icon_txt)
-	local filename_w = api.nvim_strwidth(filename)
-	local diag_w = api.nvim_strwidth(diag_icon)
-	local dup_w = api.nvim_strwidth(dup_txt)
-	local mod_w = api.nvim_strwidth(mod_txt)
-
-	local width = 4
-		+ (idx >= 10 and 2 or 1)
-		+ icon_w
-		+ filename_w
-		+ diag_w
-		+ dup_w
-		+ mod_w
-
-	local render_str = table.concat({
-		("%%%dT"):format(tabid),
-		seg(base_hl, (" %s%d "):format(is_sel and "󰄲 " or "󰄱 ", idx)),
-		seg(final_icon_hl, icon_txt .. " "),
-		seg(final_name_hl, label),
-		seg(final_diag_hl, diag_icon),
-		seg(final_mod_hl, dup_txt .. mod_txt),
-	})
-
-	return { width = width, render_str = render_str }
+	filename = util.truncate(filename, math.min(20, max_width and math.max(0, max_width - fixed) or 20))
+	local name_hl = not selected and diag and hl.get_compound_hl(diag.hl, base, false, false) or base
+	local diag_hl = diag and hl.get_compound_hl(diag.hl, base, selected, false) or base
+	local mod_hl = hl.get_compound_hl("DiagnosticOk", base, selected, false)
+	return {
+		width = fixed + api.nvim_strwidth(filename),
+		text = table.concat({
+			("%%%dT"):format(idx),
+			seg(base, prefix),
+			seg(icon_hl, icon_text),
+			seg(name_hl, filename),
+			seg(diag_hl, diag_text),
+			seg(mod_hl, duplicate .. modified),
+		}),
+	}
 end
 
 function M.render()
 	local tabs = api.nvim_list_tabpages()
-	local cur_tab = api.nvim_get_current_tabpage()
-	local cur_idx = 1
-	local cwd_str, cwd_w = get_cwd_component(20)
-
-	-- 1. 缓存维护：构建活跃 tabid 集合 + 检测全失效 + 单个清理（合并为一次遍历）
-	local active_tabs = {}
-	for _, t in ipairs(tabs) do
-		active_tabs[t] = true
+	local current, current_idx = api.nvim_get_current_tabpage(), 1
+	local entries, names, paths = {}, {}, {}
+	for i, tab in ipairs(tabs) do
+		if tab == current then
+			current_idx = i
+		end
+		local buf = representative(tab)
+		local path = buf and api.nvim_buf_get_name(buf) or ""
+		entries[i] = { buf = buf, path = path }
+		local name = path == "" and "[No Name]" or vim.fs.basename(path)
+		names[name] = (names[name] or 0) + 1
+		paths[path] = (paths[path] or 0) + 1
 	end
 
-	for t in pairs(state.tab_bufs) do
-		if not active_tabs[t] then
-			state.tab_bufs[t] = nil
-		end
+	-- 项目目录取 tab-local cwd，不随浮窗中的 lcd 改变。
+	local cwd = vim.fn.getcwd(-1, api.nvim_tabpage_get_number(current))
+	local project = vim.fs.basename(cwd)
+	project = project == "" and "/" or project
+	local header = "▌ "
+	local project_text = "  " .. util.truncate(project, 20) .. "▕ "
+	local header_width = api.nvim_strwidth(header .. project_text)
+	if header_width + 12 > vim.o.columns then
+		header, project_text, header_width = "", "", 0
 	end
-
-	-- 2. 数据收集
-	local name_stats = {}
-	local path_stats = {}
-	local tab_data = {}
-
-	for i, t in ipairs(tabs) do
-		if t == cur_tab then
-			cur_idx = i
-		end
-
-		local buf = state.tab_bufs[t]
-
-		if not buf or not api.nvim_buf_is_valid(buf) then
-			local win = api.nvim_tabpage_get_win(t)
-			buf = api.nvim_win_get_buf(win)
-			state.tab_bufs[t] = buf
-		end
-
-		local path = api.nvim_buf_get_name(buf)
-		tab_data[i] = { buf = buf, path = path }
-
-		local name = (path == "") and "[No Name]" or vim.fn.fnamemodify(path, ":t")
-		name_stats[name] = (name_stats[name] or 0) + 1
-		if path ~= "" then
-			path_stats[path] = (path_stats[path] or 0) + 1
-		end
-	end
-
-	-- 3. 生成渲染项
+	local available = math.max(1, vim.o.columns - header_width)
 	local items = {}
-	for i, t in ipairs(tabs) do
-		local d = tab_data[i]
-		items[i] = make_tab_item(t, i, t == cur_tab, name_stats, path_stats, d.buf, d.path)
+	for i, entry in ipairs(entries) do
+		items[i] = make_item(i, i == current_idx, entry, names, paths)
 	end
 
-	-- 4. 滑动窗口布局
-	local avail_width = vim.o.columns - 4 - cwd_w - 1
-	local start_idx = state.scroll_off + 1
-	if cur_idx < start_idx then
-		start_idx = cur_idx
+	-- 先保证当前项可见，再向右填满；空间不足时从左侧移走旧项。
+	local first = math.min(scroll_start, current_idx)
+	local used = 0
+	for i = first, current_idx do
+		used = used + items[i].width
 	end
-
-	local end_idx = start_idx
-	local current_w = 0
-	for i = start_idx, #items do
-		current_w = current_w + items[i].width
-		if current_w > avail_width then
-			break
-		end
-		end_idx = i
+	while used > available and first < current_idx do
+		used = used - items[first].width
+		first = first + 1
 	end
-
-	if cur_idx > end_idx then
-		local w = 0
-		end_idx = cur_idx
-		for i = cur_idx, 1, -1 do
-			w = w + items[i].width
-			if w > avail_width then
-				start_idx = i + 1
-				break
-			end
-			start_idx = i
-		end
+	local last = current_idx
+	if items[current_idx].width > available then
+		items[current_idx] = make_item(current_idx, true, entries[current_idx], names, paths, available)
+		used = items[current_idx].width
 	end
-	state.scroll_off = start_idx - 1
-
-	-- 5. 拼接输出
-	local res = {
-		"%#Special#▌ ",
-		"%#TabProject#" .. cwd_str,
-		"%#TabLine# ",
-	}
-	for i = start_idx, end_idx do
-		if items[i] then
-			table.insert(res, items[i].render_str)
-		end
+	while last < #items and used + items[last + 1].width <= available do
+		last = last + 1
+		used = used + items[last].width
 	end
-	table.insert(res, "%#TabLineFill#%T")
-	return table.concat(res)
+	-- 放大窗口/关闭 tab 后回填左侧，避免保留无意义的滚动空白。
+	while first > 1 and used + items[first - 1].width <= available do
+		first = first - 1
+		used = used + items[first].width
+	end
+	scroll_start = first
+	local result = { seg("Special", header), seg("TabProject", project_text) }
+	for i = first, last do
+		result[#result + 1] = items[i].text
+	end
+	result[#result + 1] = "%#TabLineFill#%T"
+	return table.concat(result)
 end
 
-local function update_diag(buf)
-	if not api.nvim_buf_is_valid(buf) then
-		return
-	end
-	local counts = vim.diagnostic.count(buf)
-	local new_data = nil
-	if (counts[vim.diagnostic.severity.ERROR] or 0) > 0 then
-		new_data = diag_icons[1]
-	elseif (counts[vim.diagnostic.severity.WARN] or 0) > 0 then
-		new_data = diag_icons[2]
-	elseif (counts[vim.diagnostic.severity.INFO] or 0) > 0 then
-		new_data = diag_icons[3]
-	elseif (counts[vim.diagnostic.severity.HINT] or 0) > 0 then
-		new_data = diag_icons[4]
-	end
-
-	if state.diag_cache[buf] ~= new_data then
-		state.diag_cache[buf] = new_data
-		vim.cmd.redrawtabline()
-	end
-end
-
-local function debounced_diag_update(buf)
-	state.timer:stop()
-	state.timer:start(
-		50,
-		0,
-		vim.schedule_wrap(function()
-			update_diag(buf)
-		end)
-	)
-end
-
-local function update_current_tab_cache()
-	local tab = api.nvim_get_current_tabpage()
-	local buf = api.nvim_get_current_buf()
-	state.tab_bufs[tab] = buf
-	vim.cmd.redrawtabline()
-end
+M.render = require("component.profiler").wrap("tabline", M.render)
 
 function M.setup()
 	vim.o.tabline = "%!v:lua.require('component.tabline').render()"
-
-	local grp = api.nvim_create_augroup("TablineCore", { clear = true })
-
-	api.nvim_create_autocmd({ "BufEnter", "TabEnter" }, {
-		group = grp,
-		callback = function(args)
-			update_current_tab_cache()
-			if args.buf then
-				debounced_diag_update(args.buf)
+	local group = api.nvim_create_augroup("TablineCore", { clear = true })
+	local function remember_current()
+		local buf = editing_buffer(api.nvim_get_current_win())
+		if buf then
+			tab_bufs[api.nvim_get_current_tabpage()] = buf
+		end
+		util.redraw(false, true)
+	end
+	remember_current()
+	api.nvim_create_autocmd({ "BufEnter", "WinEnter", "TabEnter" }, { group = group, callback = remember_current })
+	api.nvim_create_autocmd({ "BufFilePost", "DirChanged" }, {
+		group = group,
+		callback = function()
+			util.redraw(true, true)
+		end,
+	})
+	api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = "modified",
+		callback = function()
+			util.redraw(false, true)
+		end,
+	})
+	api.nvim_create_autocmd("TabClosed", {
+		group = group,
+		callback = function()
+			for tab in pairs(tab_bufs) do
+				if not api.nvim_tabpage_is_valid(tab) then
+					tab_bufs[tab] = nil
+				end
 			end
+			util.redraw(false, true)
 		end,
 	})
-
-	api.nvim_create_autocmd("DiagnosticChanged", {
-		group = grp,
-		callback = function(args)
-			debounced_diag_update(args.buf)
-		end,
-	})
-
-	api.nvim_create_autocmd("ColorScheme", {
-		group = grp,
-		callback = function()
-			utils.reset_hl_cache()
-		end,
-	})
-
 	api.nvim_create_autocmd("BufDelete", {
-		group = grp,
-		callback = function(args)
-			state.diag_cache[args.buf] = nil
+		group = group,
+		callback = function(ev)
+			for tab, buf in pairs(tab_bufs) do
+				if buf == ev.buf then
+					tab_bufs[tab] = nil
+				end
+			end
+			util.redraw(false, true)
 		end,
 	})
-
 	api.nvim_create_autocmd("SessionLoadPost", {
-		group = grp,
+		group = group,
 		callback = function()
-			state.tab_bufs = {}
+			tab_bufs, scroll_start = {}, 1
+			remember_current()
 		end,
 	})
-
 end
 
 return M

@@ -1,111 +1,159 @@
--- ~/.config/nvim/lua/component/stldata.lua
+-- 事件更新数据，渲染阶段只读取；Git 配置由 Git 自己解析（支持 worktree/includeIf）。
 local M = {}
 local api = vim.api
-local profiler = require("component.profiler") -- 手搓 statusline 调优用；默认关，:StlProf 开
+local redraw = require("component.util").redraw
+local users, pending_users, diagnostics, progress = {}, {}, {}, {}
+local empty_counts = {}
+local sequence = 0
 
--- ============================================================================
--- Data Providers (数据源)
--- ============================================================================
-
--- --- Git User Name (IO Cache) ---
-local user_cache = {} -- root -> name
-
--- 读取文件获取 user.name (毫秒级，带缓存)
-local function fetch_git_user(root)
-	if not root or root == "" then
-		return nil
+local function refresh_user(root, force)
+	if not root or root == "" or pending_users[root] or (not force and users[root] ~= nil) then
+		return
 	end
-	if user_cache[root] ~= nil then
-		return user_cache[root]
-	end
-
-	local function read_config(path)
-		local f = io.open(path, "r")
-		if not f then
-			return nil
-		end
-		local content = f:read("*a")
-		f:close()
-		local user_block = content:match("%[user%](.-)%[") or content:match("%[user%](.*)")
-		if user_block then
-			return user_block:match("name%s*=%s*([^\n]+)")
-		end
-		return nil
-	end
-
-	local name = read_config(root .. "/.git/config")
-	if not name then
-		local home = os.getenv("HOME")
-		if home then
-			name = read_config(home .. "/.gitconfig")
-		end
-	end
-
-	user_cache[root] = name and vim.trim(name) or false
-	return user_cache[root]
+	pending_users[root] = true
+	vim.system({ "git", "-C", root, "config", "--get", "user.name" }, { text = true }, function(result)
+		vim.schedule(function()
+			pending_users[root] = nil
+			local name = result.code == 0 and vim.trim(result.stdout or "") or ""
+			users[root] = name ~= "" and name or false
+			redraw(true, false)
+		end)
+	end)
 end
 
-M.git_info = profiler.wrap("git_info", function(buf)
-	-- 安全检测：确保 buffer 有效
-	if not api.nvim_buf_is_valid(buf) then
-		return nil
+local function refresh_users(force)
+	local roots = {}
+	for _, buf in ipairs(api.nvim_list_bufs()) do
+		local summary = vim.b[buf].minigit_summary
+		if summary and summary.root then
+			roots[summary.root] = true
+		end
 	end
+	for root in pairs(roots) do
+		refresh_user(root, force)
+	end
+end
 
+function M.git_info(buf)
 	local summary = vim.b[buf].minigit_summary
 	if not summary or not summary.head_name then
 		return nil
 	end
-
-	local user = fetch_git_user(summary.root)
 	local diff = vim.b[buf].minidiff_summary
-
 	return {
 		branch = summary.head_name,
-		user = user,
+		user = users[summary.root],
 		added = diff and diff.add or 0,
 		changed = diff and diff.change or 0,
 		deleted = diff and diff.delete or 0,
 	}
-end)
+end
 
--- LSP Progress 状态追踪
-local lsp_progress_state = {}
+function M.diagnostics(buf)
+	return diagnostics[buf] or empty_counts
+end
 
-api.nvim_create_autocmd("LspProgress", {
-	callback = function(ev)
-		local key = ev.data.client_id .. "-" .. tostring(ev.data.params.token)
-		local val = ev.data.params.value
-		if val.kind == "end" then
-			lsp_progress_state[key] = nil
-		else
-			lsp_progress_state[key] = {
-				title = val.title or (lsp_progress_state[key] and lsp_progress_state[key].title) or "",
-				message = val.message or "",
-				percentage = val.percentage,
-			}
+-- 显示最早开始的活跃任务，避免多个客户端的消息来回跳动。
+function M.lsp_progress()
+	local selected
+	for client_id, tasks in pairs(progress) do
+		local client = vim.lsp.get_client_by_id(client_id)
+		if client and not client:is_stopped() then
+			for _, task in pairs(tasks) do
+				if not selected or task.sequence < selected.sequence then
+					selected = task
+				end
+			end
 		end
-	end,
-})
+	end
+	return selected
+end
 
-M.lsp_progress = profiler.wrap("lsp_progress", function()
-	local _, task = next(lsp_progress_state)
-	if not task then
-		return nil
+function M.setup()
+	local group = api.nvim_create_augroup("ComponentData", { clear = true })
+	local function update_diagnostics(buf)
+		if api.nvim_buf_is_valid(buf) then
+			diagnostics[buf] = vim.diagnostic.count(buf)
+		end
 	end
-	return task
-end)
+	for _, buf in ipairs(api.nvim_list_bufs()) do
+		update_diagnostics(buf)
+	end
+	refresh_users(false)
 
-M.lsp_info = profiler.wrap("lsp_info", function(buf)
-	if not api.nvim_buf_is_valid(buf) then
-		return nil
-	end
-	local counts = vim.diagnostic.count(buf)
-	local err = counts[vim.diagnostic.severity.ERROR] or 0
-	local warn = counts[vim.diagnostic.severity.WARN] or 0
-	if err == 0 and warn == 0 then
-		return nil
-	end
-	return { err = err, warn = warn }
-end)
+	api.nvim_create_autocmd("DiagnosticChanged", {
+		group = group,
+		callback = function(ev)
+			update_diagnostics(ev.buf)
+			redraw(true, true)
+		end,
+	})
+	api.nvim_create_autocmd("BufWipeout", {
+		group = group,
+		callback = function(ev)
+			diagnostics[ev.buf] = nil
+		end,
+	})
+	api.nvim_create_autocmd("User", {
+		group = group,
+		pattern = { "MiniGitUpdated", "MiniDiffUpdated" },
+		callback = function(ev)
+			if ev.match == "MiniGitUpdated" then
+				local summary = vim.b[ev.buf].minigit_summary
+				if summary then
+					refresh_user(summary.root, false)
+				end
+			end
+			redraw(true, false)
+		end,
+	})
+	api.nvim_create_autocmd("FocusGained", {
+		group = group,
+		callback = function()
+			refresh_users(true)
+		end,
+	})
+	api.nvim_create_autocmd("LspProgress", {
+		group = group,
+		callback = function(ev)
+			local id, params = ev.data.client_id, ev.data.params
+			local value = params.value
+			if type(value) ~= "table" then
+				return
+			end
+			local tasks = progress[id] or {}
+			if value.kind == "end" then
+				tasks[params.token] = nil
+			elseif value.kind == "begin" or value.kind == "report" then
+				local task = tasks[params.token]
+				if not task or value.kind == "begin" then
+					sequence = sequence + 1
+					task = { title = "", message = "", sequence = sequence }
+				end
+				for _, key in ipairs({ "title", "message", "percentage" }) do
+					if value[key] ~= nil then
+						task[key] = value[key]
+					end
+				end
+				tasks[params.token] = task
+			end
+			progress[id] = next(tasks) and tasks or nil
+			redraw(true, false)
+		end,
+	})
+	api.nvim_create_autocmd("LspDetach", {
+		group = group,
+		callback = function(ev)
+			local id = ev.data.client_id
+			vim.schedule(function()
+				local client = vim.lsp.get_client_by_id(id)
+				if not client or client:is_stopped() or next(client.attached_buffers) == nil then
+					progress[id] = nil
+				end
+				redraw(true, false)
+			end)
+		end,
+	})
+end
 
 return M
