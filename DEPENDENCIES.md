@@ -48,7 +48,6 @@ lua-language-server、stylua、ty、ruff、basedpyright、taplo、vtsls、biome�
 | 工具 | 用途 | 降级行为 |
 |---|---|---|
 | **eza** | `recent_repos.lua` 目录预览（长格式/图标/git 状态） | 检测不到自动退回 `ls` |
-| **ollama**（本地服务） | CodeCompanion 的本地模型适配器 | 仅 `CODECOMPANION_LLM=qwen3_ollama` 时启用，未设置则不涉及 |
 
 ## ⚫ 无需关心
 

@@ -28,7 +28,7 @@ lua/
 │   ├── ui.lua             #   notify、which-key、原生 UI2
 │   ├── telescope.lua      #   搜索快捷键与最近仓库入口
 │   ├── editor.lua         #   treesitter、匹配、缩进高亮
-│   └── llm/               #   AI 工具：codecompanion / gpt5 / ollama-qwen3
+│   └── llm/               #   AI 工具：codecompanion（deepseek 适配器）
 ├── component/             # 自定义 UI 组件
 │   ├── statusline.lua     #   状态栏
 │   ├── tabline.lua        #   标签页栏
