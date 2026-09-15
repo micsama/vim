@@ -1,10 +1,11 @@
+-- 每个标签页一个放大窗口；同 buffer 返回时同步阅读位置。
 local M = {}
-local winid, group
+local states = {}
+local api = vim.api
 
-local function get_opts()
-	local name = vim.api.nvim_buf_get_name(0)
-	name = (name ~= "") and vim.fn.fnamemodify(name, ":t") or "[No Name]"
-
+local function get_opts(buf)
+	local name = api.nvim_buf_get_name(buf)
+	name = name ~= "" and vim.fn.fnamemodify(name, ":t") or "[No Name]"
 	return {
 		relative = "editor",
 		row = 0,
@@ -18,41 +19,56 @@ local function get_opts()
 end
 
 function M.toggle()
-	-- 1. 主动关闭逻辑
-	if winid and vim.api.nvim_win_is_valid(winid) then
-		vim.api.nvim_win_close(winid, true)
-		return -- 触发 WinClosed 自动清理，此处无需额外操作
+	local tab = api.nvim_get_current_tabpage()
+	local state = states[tab]
+	if state and api.nvim_win_is_valid(state.win) then
+		state.view = api.nvim_win_call(state.win, vim.fn.winsaveview)
+		state.buf = api.nvim_win_get_buf(state.win)
+		api.nvim_win_close(state.win, true)
+		return
 	end
-
-	-- 2. 开启逻辑
-	winid = vim.api.nvim_open_win(0, true, get_opts())
-	vim.cmd.normal("zz")
-
-	-- 3. 响应式与清理逻辑
-	group = vim.api.nvim_create_augroup("UserZoom", { clear = true })
-
-	-- 窗口调整：仅监听关键变量
-	vim.api.nvim_create_autocmd({ "VimResized", "OptionSet" }, {
-		group = group,
-		pattern = "cmdheight", -- 仅监听 cmdheight 变化
-		callback = function()
-			if vim.api.nvim_win_is_valid(winid) then
-				vim.api.nvim_win_set_config(winid, get_opts())
-			end
-		end,
-	})
-
-	-- 自动清理：解决“手动关闭窗口导致残留”的问题
-	vim.api.nvim_create_autocmd("WinClosed", {
-		group = group,
-		pattern = tostring(winid),
-		callback = function()
-			if group then
-				vim.api.nvim_del_augroup_by_id(group)
-			end
-			winid, group = nil, nil
-		end,
-	})
+	local source = api.nvim_get_current_win()
+	local view = vim.fn.winsaveview()
+	local win = api.nvim_open_win(0, true, get_opts(0))
+	vim.fn.winrestview(view)
+	states[tab] = { win = win, source = source, buf = api.nvim_win_get_buf(win), view = view }
 end
 
+local group = api.nvim_create_augroup("UserZoom", { clear = true })
+local function resize()
+	for _, state in pairs(states) do
+		if api.nvim_win_is_valid(state.win) then
+			api.nvim_win_set_config(state.win, get_opts(api.nvim_win_get_buf(state.win)))
+		end
+	end
+end
+api.nvim_create_autocmd("VimResized", { group = group, callback = resize })
+api.nvim_create_autocmd("OptionSet", { group = group, pattern = "cmdheight", callback = resize })
+-- WinClosed 时窗口可能已不可读，提前缓存视图，也覆盖手动 :close。
+api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "WinLeave", "BufWinLeave" }, {
+	group = group,
+	callback = function()
+		local state = states[api.nvim_get_current_tabpage()]
+		if state and api.nvim_get_current_win() == state.win then
+			state.view = vim.fn.winsaveview()
+			state.buf = api.nvim_win_get_buf(state.win)
+		end
+	end,
+})
+api.nvim_create_autocmd("WinClosed", {
+	group = group,
+	callback = function(ev)
+		for tab, state in pairs(states) do
+			if state.win == tonumber(ev.match) then
+				states[tab] = nil
+				if api.nvim_win_is_valid(state.source) and api.nvim_win_get_buf(state.source) == state.buf then
+					api.nvim_win_call(state.source, function()
+						vim.fn.winrestview(state.view)
+					end)
+				end
+				break
+			end
+		end
+	end,
+})
 return M
