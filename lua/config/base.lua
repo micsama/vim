@@ -61,6 +61,8 @@ vim.opt.list = true -- 显示不可见字符（如Tab/空格等）。
 vim.opt.listchars = { tab = "|\\ ", trail = "▫" } -- 设置不可见字符的显示样式: Tab为|和空格，行尾空格为▫。
 -- vim.opt.exrc = true -- 允许加载项目本地.nvimrc配置文件（请确保信任项目）。
 vim.opt.wildignore:append({ "*/__pycache__/*", "*/.git/*", "*/venv/*" }) -- 默认过滤掉一些冗余
+vim.opt.autoread = true -- 文件在外部被修改后自动重新加载（0.13 起基于文件系统 watcher 实时检测）。
+vim.opt.scrolloffpad = 1 -- 配合 scrolloff，让光标在文件末尾也能保持居中。
 
 -- =============================================================================
 -- 2) 文件与备份
