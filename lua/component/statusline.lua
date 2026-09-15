@@ -233,7 +233,7 @@ function C.menu_alive()
 		s = s .. string.format(" %%#Function#󰚩 [%s%%#Function#]", table.concat(parts, "%#Comment#,"))
 	end
 	if #orphan_idx > 0 then
-		s = s .. string.format(" %%#StlOrphan#󰊠[%s]", table.concat(orphan_idx, ","))
+		s = s .. string.format(" %%#StlOrphan#󰊠 [%s]", table.concat(orphan_idx, ","))
 	end
 	return s
 end
