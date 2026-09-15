@@ -22,24 +22,28 @@ lua/
 │   ├── autocmds.lua       #   原生 autocmd
 │   ├── lsp.lua            #   诊断 UI + vim.lsp.enable() 服务列表
 │   ├── deferred.lua       #   VimEnter/FileType 触发的延迟加载
-│   └── neovide.lua        #   仅 Neovide 客户端生效的设置
+│   ├── floatty.lua        #   Floatty 应用列表/快捷键/Runner/窗口参数
+│   ├── neovide.lua        #   仅 Neovide 客户端生效的设置
+│   └── local.lua.example  #   本机专属配置（代理等）模板，真实文件已 gitignore
 ├── plugins/               # 插件的具体配置（插件已注册后加载）
 │   ├── mini.lua           #   mini.nvim 各模块：补全/文件树/git/图标/代码片段…
 │   ├── ui.lua             #   notify、which-key、原生 UI2
 │   ├── telescope.lua      #   搜索快捷键与最近仓库入口
 │   ├── editor.lua         #   treesitter、匹配、缩进高亮
-│   └── llm/               #   AI 工具：codecompanion / gpt5 / ollama-qwen3
+│   └── llm/               #   AI 工具：codecompanion.lua / gpt5.lua / ollamaqwen3.lua
 ├── component/             # 自定义 UI 组件
 │   ├── statusline.lua     #   状态栏
 │   ├── tabline.lua        #   标签页栏
 │   ├── theme.lua          #   配色方案
 │   ├── stldata.lua        #   git/lsp/diagnostic → 状态栏用的纯数据
-│   └── hl.lua             #   statusline/tabline 共用的高亮 & 文件图标辅助
+│   ├── hl.lua             #   statusline/tabline 共用的高亮 & 文件图标辅助
+│   └── profiler.lua       #   statusline 耗时统计（:StlProf on/off）
 ├── apps/                  # 自成一体、自带 keymap 的独立功能
-│   ├── floatty.lua        #   浮动终端/窗口管理器（终端/Lazygit/AI 聊天/Runner）
-│   ├── proctop.lua        #   子进程 CPU/内存监视器 (<D-p> / :ProcTop)
-│   ├── recent_repos.lua   #   最近 Git 仓库 frecency 排序 + Telescope picker
-│   └── zoom.lua           #   窗口最大化/恢复
+│   ├── floatty.lua           #   浮动终端/窗口管理器（终端/Lazygit/AI 聊天/Runner）
+│   ├── floatty_registry.lua  #   Floatty 会话注册表与磁盘缓存
+│   ├── proctop.lua           #   子进程 CPU/内存监视器 (<D-p> / :ProcTop)
+│   ├── recent_repos.lua      #   最近 Git 仓库 frecency 排序 + Telescope picker
+│   └── zoom.lua               #   窗口最大化/恢复
 └── utils/                 # 被其他模块 require 的横向工具
     ├── map.lua            #   键位映射封装（macOS <D-key>、全角标点转换）
     ├── floatty_claude.lua #   floatty 的 Claude 会话元数据 watcher
@@ -81,7 +85,7 @@ vim.pack.add({
 
 ## mini.nvim 覆盖的功能
 
-一个插件顶多个：`completion`（补全）、`pairs`/`surround`（括号/包裹）、`diff` + `git`（Git 集成）、`files`（文件树）、`icons`（图标）、`cursorword`（光标高亮同名词）、`hipatterns`（颜色高亮）、`snippets`（代码片段）。详细配置见 `lua/plugins/mini.lua`。
+一个插件顶多个：`completion`（补全）、`pairs`/`surround`（括号/包裹）、`diff` + `git`（Git 集成）、`files`（文件树）、`icons`（图标）、`cursorword`（光标高亮同名词）、`hipatterns`（颜色高亮）、`snippets`（代码片段）、`keymap`（多步按键映射，如 `<Tab>` 复用于补全/跳转）。详细配置见 `lua/plugins/mini.lua`。
 
 ## LSP
 
